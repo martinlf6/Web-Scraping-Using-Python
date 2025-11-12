@@ -1,0 +1,7 @@
+CCF ICLC ad-hoc data collection 2020-2024 = ICLC data from CCF's ad-hoc data collection
+CCF OSA ad-hoc data collection 2020-2022 = OSA data from CCF's ad-hoc data collection
+CCF_FundYear25 09OCT25 = raw data from college submissions under pre-SB1786(89R) rules; excludes CCF's ad-hoc ICLC and OSA data collection
+CCF_FundYear25 09OCT25_merged = raw data from college submissions, inclusive of CCF ad-hoc ICLC and OSA data 
+fy25-historical-data-outliers = list of outliers* from examining change in 2023 -> 2024 outcomes
+
+*outliers defined as values exceeding 20 absolute difference and 25% difference from prior year, with at least 50 minimum value in either year examined.

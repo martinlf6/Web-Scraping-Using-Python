@@ -1,0 +1,991 @@
+---
+title: "FY25 Official Forecast for FY26 Foundation Payment: Exponential Triple Smoothing (ETS) Method"
+author: "Kristen Mosley"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    smooth_scroll: true
+
+params:
+  merged_data: "data/CCF_FundYear25 09OCT25_merged.xlsx"
+---
+
+<style>
+/* Improve readability of code and outputs */
+pre { overflow-x: auto; }
+pre code { word-wrap: normal; white-space: pre; }
+
+/* Style tables for clarity */
+table {
+  border-collapse: collapse;
+  margin: 1em 0;
+}
+th, td {
+  padding: 6px 12px;
+  border: 1px solid #ddd;
+}
+</style>
+
+## ETS Document Summary
+
+This document uses **Exponential Triple Smoothing (ETS)** to forecast 12 high-level student outcome measures for each institution:
+
+* Dual Credit Completion of 15 semester credit hours (SCH)
+* General Academic Institution (GAI) Transfer with 15 SCH
+* GAI Co-enrollment with 15 SCH
+* Institutional Credential Leading to Licensure (ICLC)
+* Occupational Skills Award (OSA)
+* Certificate I or II
+* Advanced Technical Certificate
+* Associate Degree
+* Bachelor's Degree
+* Certificate CoV Premium
+* Associate Degree CoV Premium
+* Bachelor's Degree CoV Premium
+
+The ETS model leverages historical time series data to generate smooth, statistically robust projections for future years. The outputs include forecast files saved in the ets-forecasts/ and model objects saved in the ets-models/ folder. These results provide the baseline totals that are later used in the percentage-based (PCT) method to calculate subgroup forecasts for the remaining 63 student outcomes in the community college funding model.
+
+## Global Setup
+
+```{r global_options , message = FALSE, warning = FALSE}
+options(width = 999)
+knitr::opts_chunk$set(warning = FALSE, cache = FALSE, tidy = FALSE)
+
+# Load necessary packages
+library(tidyverse)
+library(tsibble)
+library(fable)
+library(fabletools)
+library(feasts)
+library(knitr)
+library(openxlsx)
+library(purrr)
+library(kableExtra)
+
+# QC log initialization
+# Define a unique QC log file for each run
+qc_logfile <- file.path("logs", paste0("qc_ets_", format(Sys.time(), "%Y%m%d_%H%M"), ".txt"))
+
+# Store all QC events in global environment for end-of-run summary
+qc_events <- list()
+
+# Create start object for logging run time
+qc_start_time <- Sys.time()
+
+
+```
+
+
+## Quality Control (QC) Functions: 
+* log_qc
+* summarize_qc
+* check_forecast_outliers
+```{r ets_qc_functions}
+
+# Centralized Quality Control (QC) Log
+log_qc <- function(msg, 
+  # Create log message with time stamp and process level
+  level = c("INFO", "WARN", "FAIL"), step = NULL, logfile = qc_logfile) {
+  level <- match.arg(level)
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M")
+  prefix <- paste0("[",level,"]")
+  if (!is.null(step)) {
+    prefix <- paste0(prefix, " (", step, ")")
+  }
+  full_msg <- paste(prefix, msg)
+  
+  # Wrap to console width
+  wrapped_msg <- paste(strwrap(full_msg, width = getOption("width")), collapse = "\n")
+
+  # Save to global qc_events
+  qc_events[[length(qc_events) + 1]] <<- list(
+    level = level, step = step, msg = msg, timestamp = timestamp)
+
+  # Print 3 types of QC output to console
+  if (level == "INFO") message(full_msg)
+  if (level == "WARN") warning(full_msg, call. = FALSE)
+  if (level == "FAIL") {
+    message(full_msg)
+    # Show summary up to this point before stopping
+    summarize_qc(qc_events, Final = FALSE, start_time = qc_start_time)
+    stop(full_msg, call. = FALSE)
+  }
+
+  # Append console output to logfile
+  cat(full_msg, file = logfile, append = TRUE, sep = "\n")
+}
+
+# Print Initial message
+log_qc("ℹ️ QC system initialized for ETS forecasting", "INFO", "Init")
+
+# Summarize QC results
+summarize_qc <- function(events, Final = TRUE, logfile = qc_logfile, start_time = qc_start_time) {
+  if (length(events) == 0) {
+    msg <- "No QC events logged."
+    message(msg)
+    cat(msg, file = logfile, append = TRUE, sep = "\n")
+    return(invisible(NULL))
+  }
+
+  # Count events by level (always INFO, WARN, FAIL)
+  levels <- c("INFO", "WARN", "FAIL")
+  counts <- table(factor(vapply(events, function(e) e$level, character(1)), levels = levels))
+
+  # Calculate run time
+  runtime <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  if (runtime < 60) {
+    runtime_fmt <- sprintf("%.1f seconds", runtime)
+  } else if (runtime < 3600) {
+    runtime_fmt <- sprintf("%.1f minutes", runtime / 60)
+  } else {
+    runtime_fmt <- sprintf("%.2f hours", runtime / 3600)
+  }
+
+  # Build QC summary line
+  summary_msg <- paste(
+    if (Final) "QC Run Summary (Final):" else "QC Run Summary (so far):",
+    paste(names(counts), counts, collapse = " | "),
+    "| Runtime:", runtime_fmt)
+  
+  # Print QC summary lines in log
+  message(summary_msg)
+  cat(summary_msg, file = logfile, append = TRUE, sep = "\n")
+
+  # Show WARN/FAIL details
+  warn_fail <- Filter(function(e) e$level %in% c("WARN", "FAIL"), events)
+  if (length(warn_fail) > 0) {
+    msg <- "Warnings/Failures:"
+    message(msg)
+    cat(msg, file = logfile, append = TRUE, sep = "\n")
+    for (e in warn_fail) {
+      detail <- paste(" - [", e$level, "] (", e$step, ") ", e$msg, sep = "")
+      message(detail)
+      cat(detail, file = logfile, append = TRUE, sep = "\n")
+    }
+  } else {
+    msg <- "No warnings or failures. ✅ All checks passed!"
+    message(msg)
+    cat(msg, file = logfile, append = TRUE, sep = "\n")
+  }
+}
+
+# Outlier QC function
+# Hybrid rule = absolute value greater than threshold AND percent difference greater than threshold
+# Comparing 2024 -> 2025
+# NOTE, 3750 TOTAL forecasts = 75 forecasts for 50 colleges;
+check_forecast_outliers <- function(historical,
+                                    forecast,
+                                    abs_threshold = 20,
+                                    pct_threshold = 0.25,
+                                    min_val = 50,
+                                    logfun = log_qc,
+                                    export_missing = TRUE) {
+  # historical: full historical dataset (contains Year)
+  # forecast: full forecast dataset (contains Year)
+  # abs_threshold: absolute difference threshold (same units as variables)
+  # pct_threshold: relative difference threshold (fraction, e.g. 0.25 = 25%)
+  # min_val: require either forecast or historical to be >= min_val for outlier to count
+  # logfun: function for logging QC information (log_qc)
+  # export_missing: if TRUE, export a diagnostic listing missing (college,variable) comparisons
+
+  # Helper function for WARN messages that prints immediately
+  log_warn_immediate <- function(msg) {
+    logfun(msg, "WARN", "Outlier QC")
+    message(sprintf("[WARN] (Outlier QC) %s", msg))
+  }
+  
+  # Identify forecast columns (exclude ids/index columns)
+  forecast_vars <- setdiff(names(forecast), c("FICE", "Institution", "Year", "Type"))
+  if (length(forecast_vars) == 0) {
+    logfun("❌ No forecast variables detected (nothing to compare).", "FAIL", "Outlier QC")
+    return(tibble()) 
+  }
+
+  # Subset 2024 historicals and 2025 forecasts
+  hist_2024 <- historical %>%
+    filter(Year == 2024) %>%
+    select(FICE, Institution, all_of(forecast_vars))
+
+  fcst_2025 <- forecast %>%
+    filter(Year == 2025) %>%
+    select(FICE, Institution, all_of(forecast_vars))
+
+  # Pivot to long for easy comparison
+  hist_long <- hist_2024 %>%
+    pivot_longer(cols = -c(FICE, Institution), names_to = "Variable", values_to = "Value_2024")
+
+  fc_long <- fcst_2025 %>%
+    pivot_longer(cols = -c(FICE, Institution), names_to = "Variable", values_to = "Forecast")
+
+  # Join forecasts to historicals (left join on forecasts)
+  comp <- left_join(fc_long, hist_long, by = c("FICE", "Institution", "Variable"))
+
+  # Robust numeric conversion & diffs
+  comp <- comp %>%
+    mutate(
+      Forecast_num = suppressWarnings(as.numeric(Forecast)),
+      Value2024_num = suppressWarnings(as.numeric(Value_2024)),
+      # compute diffs using numeric versions
+      abs_diff = abs(Forecast_num - Value2024_num),
+      denom = ifelse(is.na(Value2024_num) | Value2024_num == 0, 1, abs(Value2024_num)),
+      pct_diff = pmin(abs_diff / denom, 1.00)  # cap at 100%
+    )
+
+  # Diagnostic counts before filtering
+  n_before <- nrow(comp)
+
+  # ENFORCE min_val as a hard pre-filter
+  # Keep rows only if at least one side is >= min_val (this removes rows where BOTH < min_val)
+  comp_filtered <- comp %>%
+    filter(!is.na(Forecast_num) & !is.na(Value2024_num)) %>%
+    filter(Forecast_num >= min_val | Value2024_num >= min_val)
+
+  n_after_minval <- nrow(comp_filtered)
+  n_removed_by_minval <- n_before - n_after_minval
+
+  # Log how many rows were removed by min_val (helpful diagnostic)
+  logfun(sprintf("ℹ️ %d rows removed because both Forecast and 2024 < %d (min_val).",
+                 n_removed_by_minval, min_val),
+         "INFO", "Outlier QC")
+
+  # Apply threshold rule to the (already min_val-filtered) set
+  outliers_df <- comp_filtered %>%
+    filter(abs_diff > abs_threshold & pct_diff > pct_threshold)
+
+  # Diagnostics: Expected comparisons (institutions * variables) vs actual rows available to compare
+  inst_union <- sort(unique(c(unique(fc_long$FICE), unique(hist_long$FICE))))
+  expected_total <- length(inst_union) * length(forecast_vars)
+
+  # Use the number of rows actually used for threshold testing (comp_filtered)
+  actual_comp_rows <- n_after_minval
+
+  # Percent of outliers relative to actual comparisons used
+  outlier_pct <- if (actual_comp_rows > 0) nrow(outliers_df) / actual_comp_rows else 0
+  
+  # Compute % outliers relative to the ENTIRE dataset (before any filtering)
+  outlier_pct_total <- if (n_before > 0) nrow(outliers_df) / n_before else 0
+
+  # Log the main QC message (WARN if >5% otherwise INFO)
+  msg_text <- sprintf(
+    "ℹ️ %d out of %d ETS forecasts (%.1f%%) exceed both %d absolute and %.0f%% relative difference from 2024 values.",
+    nrow(outliers_df), n_before, 100 * outlier_pct_total, abs_threshold, 100 * pct_threshold
+  )
+
+  if(outlier_pct_total > 0.05) {
+    log_warn_immediate(msg_text)   # prints immediately
+  } else {
+    logfun(msg_text, "INFO", "Outlier QC")  # normal INFO logging
+  }
+
+  # If actual comparisons differ from expected, export a small diagnostic and log it
+  if (n_before != expected_total) {
+    diag_msg <- sprintf(
+      "❌  Expected %d comparisons (institutions * vars) but have %d joined rows to compare. Missing: %d.",
+      expected_total, n_before, expected_total - n_before)
+    logfun(diag_msg, "INFO", "Outlier QC")
+
+    if (export_missing) {
+      all_pairs <- expand_grid(FICE = inst_union, Variable = forecast_vars)
+      present_pairs <- comp %>% distinct(FICE, Variable)
+      missing_pairs <- anti_join(all_pairs, present_pairs, by = c("FICE", "Variable"))
+      write.xlsx(missing_pairs, file = "final-forecasts/fy25-official-outlier-missing-diagnostic.xlsx", overwrite = TRUE)
+      logfun("✅ Exported missing-comparisons diagnostic to final-forecasts/fy25-official-outlier-missing-diagnostic.xlsx", "INFO", "Outlier QC")
+    }
+  }
+
+  # Return the outliers in the shape downstream code expects
+  out_final <- outliers_df %>%
+    transmute(FICE, Institution, Variable, Forecast = Forecast_num, Value_2024 = Value2024_num, abs_diff, pct_diff)
+
+  invisible(out_final)
+}
+```
+
+## Import & Clean Data Function: 
+* clean_data
+```{r data_functions}
+# Clean data function
+# Clean and prepare the dataset for forecasting
+# Identifies historical data gaps with "NA"
+# Converts the dataset to a tsibble
+# @param data Raw data frame read from Excel.
+# @return A tsibble object ready for forecasting.
+# @examples
+#   clean_data(read.xlsx("data/FY25_23APR25.xlsx"))
+clean_data <- function(file_path) {
+  
+  # QC: Confirm correct data file used/found
+  if (!file.exists(file_path)) {
+    log_qc(paste("❌ Data file not found:", file_path), "FAIL", "Import")
+  } else {
+    log_qc(paste("✅ Data file found:", file_path), "INFO", "Import")
+  }
+  
+  # Read raw data
+  data <- read.xlsx(file_path)
+  
+  # clean column names
+  colnames(data) <- make.names(colnames(data))
+  
+  # Replace missing values with 0 for all variables
+  data <- data %>%
+    mutate(across(.cols = everything(), ~replace_na(.x, 0)))
+  
+  # QC: Detailed NA check
+  na_counts <- colSums(is.na(data))
+  
+  # Only keep columns with NAs
+  na_counts <- na_counts[na_counts > 0]  
+  if (length(na_counts) > 0) {
+    na_msg <- paste(
+      "ℹ️ Missing values detected in the following variables:",
+      paste(paste0(" - ", names(na_counts), ": ", na_counts, " NAs"), collapse = "\n"))
+    log_qc(na_msg, "INFO", "Clean")
+  } else {
+    log_qc("ℹ️ No missing values detected.", "INFO", "Clean")
+  }
+  
+  # Convert to forecasting-friendly tsibble
+  tsibble_data <- data %>%
+    as_tsibble(key = c("FICE", "Institution"), index = "Year")
+  
+  return(tsibble_data)
+}
+
+```
+
+## ETS Model Fitting Function: 
+* fit_forecast_ets
+```{r ets_model_fn}
+# Purpose:
+#   Fits an ETS (Error-Trend-Seasonal) model for one variable at one institution, and produces a one-year forecast.
+
+# How it works:
+#   - Can run either "additive" or "multiplicative" versions.
+#   - Multiplicative models are log-transformed behind the scenes so the model runs stably, then results are back-transformed.
+#   - Given current historical data needs, only simple ETS types (ETS(A,N,N) or ETS(M,N,N)) are supported.
+#   - If the wrong model type is passed in, the function stops with an error.
+
+# Inputs:
+#   - tsdata: historical credential counts for all institutions
+#   - variable: the variable name to forecast (e.g., "TOTAL.OSA")
+#   - model_type: "A" = additive, "M" = multiplicative (default = "A")
+#   - ets_label: optional QC flag to force the ETS type for model output documentation
+
+# Outputs:
+#   A small table (tibble) with:
+#     - FICE (college ID)
+#     - Institution (name)
+#     - Year (forecast year)
+#     - Type = "ETS"
+#     - <variable> = forecasted value (rounded)
+
+# Example:
+#   fit_forecast_ets(tsdata_subset, "TOTAL.OSA", "A")
+
+fit_forecast_ets <- function(tsdata, variable, model_type = "A", ets_label = NA) {
+  
+  #QC: Ensure only ETS(A,N,N) or ETS(M,N,N) are used
+  if(!is.na(ets_label) && !(ets_label %in% c("ETS(A,N,N)", "ETS(M,N,N)"))) {
+    stop(paste("ERROR:", variable, 
+               "has unsupported model type:", ets_label))
+  }
+  
+  #Fit ETS model depending on type (multiplicative or additive)
+  if(model_type == "M"){
+    model_fit <- tsdata %>% 
+      model(ETS(log(!!sym(variable)) ~ error("A") + trend("N") + season("N")))
+  } else {
+    model_fit <- tsdata %>% 
+      model(ETS(!!sym(variable) ~ error("A") + trend("N") + season("N")))
+  }
+  
+  #QC: Confirm ETS(M,N,N) was log-transformed and run as additive
+  if(model_type == "M") {
+    fitted_model <- model_fit %>% 
+      pull(1) %>% .[[1]]
+
+  }
+  
+  #Forecast and format output
+  fc <- model_fit %>%
+    forecast(h = 1) %>%
+    as.data.frame() %>%
+    select(FICE, Institution, Year, .mean) %>%
+    # Add short label "ETS" for "Type" column
+    # Rename .mean as variable
+    mutate(Type = "ETS",
+           !!variable := round(.mean),
+           .keep = "unused")
+  
+  return(fc)
+}
+
+```
+
+## ETS Model Orchestration Function: 
+* ets_forecast_pipeline
+```{r ets_run_fn}
+# Purpose:
+#   Runs the full ETS forecasting workflow for a chosen variable across ALL institutions at once. Also saves results to Excel files.
+
+# How it works:
+#   1. Pulls out the data for the chosen variable across all colleges.
+#   2. Special handling: for OSA and ICLC variables, removes 2018–2019 values (no data)
+#   3. Fits ETS models to decide if each college is additive (A) or multiplicative (M).
+#   4. Splits the dataset into additive and multiplicative groups.
+#   5. Runs forecasts for each group using fit_forecast_ets().
+#   6. Combines all results back together.
+#   7. Writes two Excel files:
+#        - ets-models/<prefix>-<variable>-model.xlsx  (model types per variable)
+#        - ets-forecasts/<prefix>-<variable>-forecast.xlsx  (forecasts per variable)
+
+# Inputs:
+#   - data: historical credential counts for all institutions
+#   - variable: the variable name to forecast
+#   - output_prefix: filename prefix for Excel outputs (default = "ETS25")
+
+# Outputs:
+#   - Returns the combined forecast table (invisibly).
+#   - Also saves two Excel files per forecast variable (models + forecasts).
+#   - Writes log messages for transparency and quality control.
+
+# Example:
+#   ets_forecast_pipeline(tsdata, "TOTAL.OSA", "ETS25")
+
+ets_forecast_pipeline <- function(data, variable, output_prefix = "ETS25") {
+  
+  # Step 1: Subset data to just the variable of interest
+  tsdata_var <- data %>% 
+    select(FICE, Institution, Year, !!sym(variable))
+  
+  # Special handling for OSA and ICLC: exclude 2018–2019 entirely from the model
+  if (variable %in% c("TOTAL.OSA", "TOTAL.Institutional.Credential.leading.to.Licensure")) {
+    tsdata_var <- tsdata_var %>% 
+      filter(!Year %in% 2018:2019)
+    
+    log_qc(paste("ℹ️ Excluded 2018–2019 data from ETS model for", variable, "per missing data"), 
+           "INFO", "Forecast")
+  }
+  
+  # Step 2: Fit a preliminary ETS model to detect type (additive or multiplicative)
+  fc_model <- tsdata_var %>% 
+    model(ETS = ETS(!!sym(variable)))
+  
+  # QC: Check for presence of model fitting
+  if(nrow(fc_model) == 0){
+    log_qc(paste(variable, "❌ No models fitted. Output will be empty"), "WARN", "Forecast")
+    return(invisible(NULL))
+  }
+  
+  # Extract model type for each institution 
+  model_types <- fc_model %>%
+    mutate(ETS_text = map_chr(ETS, ~ model_sum(.x[[1]]))) %>%
+    as_tibble() %>%
+    select(FICE, Institution, ETS_text)
+
+  # Identify which ETS types exist (has_M = multiplicative, has_A = additive)
+  has_M <- any(model_types$ETS_text == "ETS(M,N,N)")
+  has_A <- any(model_types$ETS_text == "ETS(A,N,N)")
+  
+  # Utility function to create empty tsibble if no data
+  empty_tsibble <- function(var){
+    tibble(FICE=character(),
+           Institution=character(),
+           Year=integer(),
+           !!sym(var) := numeric()) %>%
+      as_tsibble(key = c("FICE","Institution"), index = Year)
+  }
+  
+  # Step 3: Split data by ETS type
+  tsdataM <- if(has_M) {
+    tsdata_var %>%
+      filter(Institution %in% model_types$Institution[model_types$ETS_text == "ETS(M,N,N)"])
+  } else empty_tsibble(variable)
+  
+  tsdataA <- if(has_A) {
+    tsdata_var %>%
+      filter(Institution %in% model_types$Institution[model_types$ETS_text == "ETS(A,N,N)"])
+  } else empty_tsibble(variable)
+  
+  # Step 4: Forecast each type using fit_forecast_ets()
+  ets_list <- list(
+    multiplicative = if(nrow(tsdataM) > 0) {
+      tryCatch(
+        fit_forecast_ets(tsdataM, variable, "M", ets_label = "ETS(M,N,N)"),
+        error = function(e) { 
+          message(e$message); empty_tsibble(variable) })
+    } else empty_tsibble(variable),
+    
+    additive = if (nrow(tsdataA) > 0) {
+      tryCatch(
+        fit_forecast_ets(tsdataA, variable, "A", ets_label = "ETS(A,N,N)"),
+        error = function(e) { 
+          message(e$message); empty_tsibble(variable) }
+      )
+    } else empty_tsibble(variable))
+  
+  # Step 5: Combine forecasts
+  ets_combined <- bind_rows(ets_list)
+  
+  # Save ETS model summaries to Excel
+  write.xlsx(model_types, file=paste0("ets-models/", output_prefix, "-", variable, "-model.xlsx"))
+  
+  # Save ETS forecasts to Excel
+  write.xlsx(ets_combined, file=paste0("ets-forecasts/", output_prefix, "-", variable, "-forecast.xlsx"))
+  
+  log_qc(paste("✅ Completed ETS forecast for variable:", variable), "INFO", "Forecast")
+  
+  invisible(ets_combined)
+}
+
+```
+
+## Import and clean data
+```{r import_clean}
+# Call in and clean data
+tsdata <- clean_data(params$merged_data)
+
+# QC: Confirm 50 observations of data for each historical year
+qc_check <- tsdata %>%
+  count(Year, name = "n_obs") %>%
+  mutate(status = if_else(n_obs < 50, "FAIL", "INFO"))
+
+# Log results for each year
+qc_check %>%
+  rowwise() %>%
+  mutate(msg = paste0("Year ", Year, ": ", n_obs, " rows")) %>%
+  mutate(dummy = log_qc("ℹ️ Historical data row check", status, msg)) %>%
+  invisible()
+
+```
+
+## Visualize Historical Data for ETS Forecast Variables
+```{r ets_historical_trends, fig.width=12, fig.height=8}
+
+# Subset tsdata to forecast variables
+forecast_vars <- c(
+  "X15.SCH.Dual.Credit",
+  "GAI.Transfer.with.15.SCH",
+  "GAI.Co.enrollment.with.15.SCH",
+  "TOTAL.Institutional.Credential.leading.to.Licensure",
+  "TOTAL.OSA",
+  "TOTAL.Certificate.I.or.II",
+  "TOTAL.Advanced.Technical.Certificate",
+  "TOTAL.Associate.Degree",
+  "TOTAL.Bachelor.s.Degree",
+  "TOTAL.Certificate.I.or.II..COV.Premium",
+  "TOTAL.Associate..CoV.Premium",
+  "TOTAL.Bachelor.s.Degree..CoV.Premium"
+)
+
+# Aggregate data Texas-wide by Year
+tx_hist <- tsdata %>%
+  as_tibble() %>%               # convert tsibble to plain tibble
+  select(Year, all_of(forecast_vars)) %>% 
+  pivot_longer(
+    cols = -Year, 
+    names_to = "Variable", 
+    values_to = "Value"
+  ) %>%
+  group_by(Year, Variable) %>%
+  summarise(Total = sum(Value, na.rm = TRUE), .groups = "drop")
+
+# Create grouping for small vs large outcomes (control Y axis)
+tx_hist <- tx_hist %>%
+  mutate(SizeGroup = if_else(Total < 20000, "Below 20,000", "20,000 and Above"))
+
+# Plot historical trends - overall graph
+ggplot(tx_hist, aes(x = Year, y = Total, color = Variable)) +
+  geom_line(size = 1.1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Texas-wide Historical Trends for ETS Forecast Variables",
+    subtitle = "Sum of each outcome across all institutions by Year",
+    x = "Year",
+    y = "Total Value",
+    color = "Outcome (Variable)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+# Plot historical trends - with facets for the two size groups
+ggplot(tx_hist, aes(x = Year, y = Total, color = Variable)) +
+  geom_line(size = 1.1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Texas-wide Historical Trends for ETS Forecast Variables - Separate Y Axes",
+    subtitle = "Sum of each outcome across selected institutions by Year",
+    x = "Year",
+    y = "Total Value",
+    color = "Outcome (Variable)"
+  ) +
+  facet_wrap(~SizeGroup, scales = "free_y") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+```
+
+## ETS Forecast Run
+```{r batch_fc}
+
+# Safe run wrapper for ETS forecast pipeline
+safe_run <- safely(ets_forecast_pipeline)
+
+# Run ETS forecast pipeline for each variable (using forecast_vars object created above)
+results <- map(forecast_vars, ~safe_run(tsdata, .x))
+
+# Identify any failures
+failed_vars <- forecast_vars[map_lgl(results, ~!is.null(.x$error))]
+
+if(length(failed_vars)>0){
+  log_qc(paste("❌ The following variables failed:", paste(failed_vars, collapse=", ")), "WARN", "Forecast")
+} else {
+  log_qc("✅ All variables successfully forecasted!", "INFO", "Forecast")
+}
+
+```
+
+## Check for Presence of Additional ETS Models
+```{r ets_model_type_qc}
+
+# Collect all model types from the model summary files
+model_files <- list.files("ets-models", pattern = "-model.xlsx$", full.names = TRUE)
+all_models <- map_df(model_files, read.xlsx)
+
+# Get unique ETS model types
+unique_models <- unique(all_models$ETS_text)
+
+# Allowed models
+accounted_for <- c("ETS(M,N,N)", "ETS(A,N,N)")
+
+# QC: Check for any unaccounted for models
+unaccounted_for <- setdiff(unique_models, accounted_for)
+
+if (length(unaccounted_for) == 0) {
+  msg <- sprintf(
+    "✅ Only allowed ETS models detected: %s.",
+    paste(accounted_for, collapse = ", "))
+  log_qc(msg, "INFO", "ETS Model QC")
+} else {
+  msg <- sprintf(
+    "❌ QC FAIL: Unaccounted for ETS models detected: %s. Accounted for models are: %s.",
+    paste(unaccounted_for, collapse = ", "),
+    paste(accounted_for, collapse = ", "))
+  log_qc(msg, "FAIL", "ETS Model QC")
+  stop(msg)
+}
+```
+
+## Merge ETS Forecast Outputs
+* 50 rows expected (one per institution)
+* 16 columns expected (FICE, Institution, Year, Type + 12 ETS forecast vars)
+```{r merge_fc}
+
+# Get all XLSX files from the ets-forecasts output folder
+# Only include files with starting characters "ETS25-"
+xlsx_files <- list.files("ets-forecasts", 
+                         pattern = "^ETS25-.*-forecast\\.xlsx$", 
+                         full.names = TRUE)
+
+# Read all XLSX files into a list of data frames
+df_list <- map(xlsx_files, read.xlsx)
+
+# QC: Check for correct number of forecast files
+if(length(df_list) == 12) log_qc("✅ All forecast files found", "INFO", "Merge")
+if(length(df_list) < 12) log_qc("❌ Less than 12 forecast files found", "FAIL", "Merge")
+if(length(df_list) < 12) log_qc("❌ Greater than 12 forecast files found", "FAIL", "Merge")
+
+# Inner join all data frames in the list
+joined_df <- suppressMessages(reduce(df_list, inner_join))
+
+# QC: Check for correct number of forecast rows (n=50) and columns (n=16) in file merging
+if(nrow(joined_df)<50) log_qc("❌ Merged forecast row error", "FAIL", "Merge")
+if(ncol(joined_df)!=16) log_qc("❌ Merged forecast column error", "FAIL", "Merge") 
+
+# Print row and column counts for debugging
+log_qc(paste("ℹ️ Merged forecast rows:", nrow(joined_df)), "INFO", "Merge")
+log_qc(paste("ℹ️ Merged forecast columns:", ncol(joined_df)), "INFO", "Merge")
+
+# Relocate columns to align with correct funding model order
+joined_df <- joined_df %>% 
+  relocate(c(X15.SCH.Dual.Credit, GAI.Transfer.with.15.SCH), .before = GAI.Co.enrollment.with.15.SCH) %>% 
+  relocate(c(TOTAL.Institutional.Credential.leading.to.Licensure, TOTAL.OSA), .after = GAI.Co.enrollment.with.15.SCH) %>% 
+  relocate(TOTAL.Certificate.I.or.II, .before = TOTAL.Advanced.Technical.Certificate) %>% 
+  relocate(TOTAL.Associate..CoV.Premium, .after = TOTAL.Bachelor.s.Degree) %>% 
+  relocate(TOTAL.Certificate.I.or.II..COV.Premium, .before = TOTAL.Associate..CoV.Premium)
+
+```
+
+## Check for Outliers in ETS Forecasts
+```{r outlier_qc_run}
+# Read historical data
+raw_data <- read.xlsx(params$merged_data) %>%
+  mutate(Type = "Historical") %>%
+  relocate("Type", .after = Year) %>%
+  mutate(across(-c(FICE, Institution, Type), as.numeric))
+
+# Run QC check (historical vs. forecasts)
+outliers <- check_forecast_outliers(
+  historical = raw_data,
+  forecast   = joined_df,
+  abs_threshold = 20,
+  pct_threshold = 0.25,
+  min_val = 50
+)
+
+# QC: Create table for outlier information, including Value_2024, Forecast, abs_diff, and pct_diff
+if (exists("outliers") && nrow(outliers) > 0) {
+  outlier_table <- outliers %>%
+    select(FICE, Institution, Variable, Value_2024, Forecast, abs_diff, pct_diff) %>%
+  mutate(
+    pct_diff = round(pct_diff * 100, 0),
+    pct_diff = paste0(pct_diff, "%")) %>%
+    arrange(desc(pct_diff))
+
+
+  # Show top outlier information
+  kable(
+    head(outlier_table, 20), 
+    caption = "QC: Top 20 Outliers by Outlier Percentage Difference",
+    align = c("l", "l", "l", "c", "c", "c", "c") # left for cols 1-3, center for 4-7
+  )
+} else {
+  log_qc("ℹ️ No outliers detected in forecast vs. 2024 comparison.", "INFO", "Outlier QC")
+}
+
+# Export outliers for review
+if (nrow(outliers) > 0) {
+  write.xlsx(outliers,
+             file = "final-forecasts/fy25-official-forecast-outliers.xlsx",
+             overwrite = TRUE)
+  log_qc("✅ Exported outliers to final-forecasts/fy25-official-forecast-outliers.xlsx", "INFO", "Outlier QC")
+} else {
+  log_qc("ℹ️ No forecast outliers exported (none detected).", "INFO", "Outlier QC")
+}
+```
+
+## Export Final ETS Forecast File
+```{r output_fc}
+
+# Add ETS forecast data to raw data
+data_ets <- raw_data %>% 
+  add_row(joined_df)
+
+# Change NAs to blanks
+data_ets[is.na(data_ets)] <- ""
+
+# Export forecast output
+write.xlsx(data_ets, file = "ets-forecasts/fy25-official-ets-forecasts.xlsx", overwrite = TRUE)
+
+# Forecast output QC
+if (!file.exists("ets-forecasts/fy25-official-ets-forecasts.xlsx")) {
+  log_qc("❌ Final ETS forecast file not written", "FAIL", step = "Export")
+} else {
+  log_qc("✅ Final ETS forecast file successfully written: ets-forecasts/fy25-official-ets-forecasts.xlsx", "INFO", step = "Export")
+}
+
+# Also save as tibble for use in parent RMD
+fc_ets <- data_ets
+```
+
+## Visualize ETS Forecast Trends
+```{r ets_fc_trends_plot, fig.width=12, fig.height=8}
+# Combine historical and forecast data for trend line
+tx_hist_forecast <- data_ets %>%
+  as_tibble() %>%
+  select(Year, all_of(forecast_vars)) %>%
+  mutate(across(-Year, as.numeric)) %>%  # force numeric
+  pivot_longer(
+    cols = -Year,
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  group_by(Year, Variable) %>%
+  summarise(Total = sum(Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(DataType = if_else(Year <= 2024, "Historical", "Forecast"))
+
+# classify each variable based on its maximum total
+var_size <- tx_hist_forecast %>%
+  group_by(Variable) %>%
+  summarise(MaxTotal = max(Total, na.rm = TRUE), .groups = "drop") %>%
+  mutate(SizeGroup = if_else(MaxTotal < 20000, "Below 20,000", "20,000 and Above"))
+
+tx_hist_forecast <- tx_hist_forecast %>%
+  left_join(var_size %>% select(Variable, SizeGroup), by = "Variable")
+
+# Create segments for 2024 -> 2025 for each variable
+segment_data <- tx_hist_forecast %>%
+  filter(Year %in% c(2024, 2025)) %>%
+  select(Year, Variable, Total, SizeGroup) %>%
+  pivot_wider(names_from = Year, values_from = Total) %>%
+  filter(!is.na(`2024`) & !is.na(`2025`)) %>%
+  rename(Actual_2024 = `2024`, Forecast_2025 = `2025`)
+
+# Plot
+ggplot() +
+  # Historical line
+  geom_line(data = tx_hist_forecast %>% filter(DataType == "Historical"),
+            aes(x = Year, y = Total, color = Variable), size = 1.1) +
+  geom_point(data = tx_hist_forecast %>% filter(DataType == "Historical"),
+             aes(x = Year, y = Total, color = Variable), size = 2, shape = 16) + # circles
+
+  # Dashed segments 2024 -> 2025
+  geom_segment(data = segment_data,
+               aes(x = 2024, xend = 2025, y = Actual_2024, yend = Forecast_2025, color = Variable),
+               linetype = "dashed", size = 1) +
+
+  # Forecast points
+  geom_point(data = tx_hist_forecast %>% filter(DataType == "Forecast"),
+             aes(x = Year, y = Total, color = Variable), size = 3, shape = 17) + # triangles
+
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Texas-wide Historical Trends + Forecasts for ETS Forecast Variables",
+    subtitle = "Sum of each outcome across selected institutions by Year",
+    x = "Year",
+    y = "Total Value",
+    color = "Outcome (Variable)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+# Plot with facets by size group
+ggplot() +
+  # Historical line
+  geom_line(data = tx_hist_forecast %>% filter(DataType == "Historical"),
+            aes(x = Year, y = Total, color = Variable), size = 1.1) +
+  geom_point(data = tx_hist_forecast %>% filter(DataType == "Historical"),
+             aes(x = Year, y = Total, color = Variable), size = 2, shape = 16) + # circles
+
+  # Dashed segments 2024 -> 2025
+  geom_segment(data = segment_data,
+               aes(x = 2024, xend = 2025, y = Actual_2024, yend = Forecast_2025, color = Variable),
+               linetype = "dashed", size = 1) +
+
+  # Forecast points
+  geom_point(data = tx_hist_forecast %>% filter(DataType == "Forecast"),
+             aes(x = Year, y = Total, color = Variable), size = 3, shape = 17) + # triangles
+
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Texas-wide Historical Trends + Forecasts for ETS Forecast Variables - Separate Y Axes",
+    subtitle = "Sum of each outcome across selected institutions by Year",
+    x = "Year",
+    y = "Total Value",
+    color = "Outcome (Variable)"
+  ) +
+  facet_wrap(~SizeGroup, scales = "free_y") +   # split into 2 plots
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+```
+
+## Check ETS Forecasts % Change from 2024 to 2025
+```{r ets_delta_dot, fig.width=10, fig.height=12}
+# Build long-format comparison table for ETS
+# Use same vars object as created earlier (forecast_vars)
+# Subset 2024 historical
+hist_2024 <- raw_data %>%
+  filter(Year == 2024) %>%
+  select(FICE, Institution, all_of(forecast_vars)) %>%
+  pivot_longer(-c(FICE, Institution), names_to = "Variable", values_to = "Value_2024")
+
+# Subset 2025 ETS forecasts
+fcst_2025 <- joined_df %>%
+  filter(Year == 2025) %>%
+  select(FICE, Institution, all_of(forecast_vars)) %>%
+  pivot_longer(-c(FICE, Institution), names_to = "Variable", values_to = "Forecast")
+
+# Join into comp_long
+comp_long_ets <- left_join(fcst_2025, hist_2024, by = c("FICE", "Institution", "Variable"))
+
+# Build delta (change from 2024 actual to 2025 forecast) dataframe
+delta_df <- comp_long_ets %>%
+  mutate(
+    abs_diff = Forecast - coalesce(Value_2024, 0),
+    pct_change_raw = if_else(!is.na(Value_2024) & Value_2024 != 0,
+                             100 * (Forecast - Value_2024) / abs(Value_2024),
+                             NA_real_),
+    pct_change_bounded = 100 * (Forecast - coalesce(Value_2024, 0)) /
+      pmax(abs(coalesce(Value_2024, 0)), abs(Forecast), 1),
+    flag_new_from_zero = (!is.na(Value_2024) & Value_2024 == 0 & Forecast > 0),
+    small_base = (coalesce(Value_2024, 0) < 50 | coalesce(Forecast, 0) < 50) # flag small bases
+  )
+
+# Order institutions by median absolute difference
+inst_order <- delta_df %>%
+  group_by(Institution) %>%
+  summarize(med_abs = median(abs_diff, na.rm = TRUE)) %>%
+  arrange(desc(med_abs)) %>%
+  pull(Institution)
+
+# Plot
+ggplot(delta_df, aes(x = pct_change_bounded, 
+                     y = factor(Institution, levels = inst_order))) +
+  # reference line at 0% change
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  
+  # main points (uniform size)
+  geom_point(aes(color = Variable,
+                 shape = if_else(small_base, "small", "normal")),
+             size = 2.5, alpha = 0.9, stroke = 1.2) +
+  
+  # star marker for new-from-zero cases
+  geom_point(data = delta_df %>% filter(flag_new_from_zero),
+             aes(x = pct_change_bounded, 
+                 y = factor(Institution, levels = inst_order),
+                 color = Variable,
+                 shape = "new_from_zero"),
+             size = 3.5, inherit.aes = FALSE) +
+  
+  # axis scaling
+  scale_x_continuous(labels = function(x) paste0(x, "%"),
+                     limits = c(-100, 100)) +
+  
+  # shape legend (normal, hollow, star)
+  scale_shape_manual(
+    values = c("normal" = 16, "small" = 1, "new_from_zero" = 8),
+    labels = c("normal" = "Normal",
+               "small" = "Small count (<50)",
+               "new_from_zero" = "New from zero in 2024"),
+    name = "Special cases"
+  ) +
+  
+  # labels
+  labs(
+    title = "ETS forecasts: % Change in 2025 Forecast vs 2024 (by institution & outcome)",
+    x = "Bounded % change (−100% to +100%)",
+    y = "Institution",
+    color = "Outcome (Variable)"
+  ) +
+  
+  # legend cleanup
+  guides(
+    color = guide_legend(override.aes = list(size = 4, alpha = 1)),
+    shape = guide_legend(override.aes = list(size = 3, stroke = 1.2))
+  ) +
+  
+  theme_minimal(base_size = 11) +
+  theme(axis.text.y = element_text(size = 6),
+        legend.position = "right")
+
+```
+
+
+## Export QC Log Summary for ETS Forecasting
+```{r qc_log}
+
+# Output QC Log
+summarize_qc(qc_events, Final = TRUE)
+
+```
+

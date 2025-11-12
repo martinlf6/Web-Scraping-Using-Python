@@ -1,0 +1,14 @@
+data/ = raw data, ad-hoc data, transformed/merged data, historical outlier data
+ets-forecasts/ = ETS output for 12 outcomes forecast with exponential triple smoothing (ETS)
+ets-models = ETS model specifications for each outcome forecast 
+final-forecasts = final output forecast files for funding model
+logs/ = txt files displaying run logs with timestamps, warnings, and status messages for ETS and PCT forecast runs
+pct-averages/ = percentage-based (PCT) output for 63 outcome forecast with historical average student outcome counts
+RMD files = use data folder input to output transformed/merged data, forecasts, models, and output folder files
+HTML files = report RMD file runs, with messages detailing the process, limited data tables, and data visualizations
+
+
+fy25-official-unified-forecast.rmd = run for calculating official fy25 forecasts
+	*this is a "parent" rmd, which will also run 2 child rmds: 
+		fy25-official-ets-forecast.rmd
+		fy25-official-pct-forecast.rmd

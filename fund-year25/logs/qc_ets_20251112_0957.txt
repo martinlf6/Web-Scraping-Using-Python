@@ -1,0 +1,36 @@
+[INFO] (Init) ℹ️ QC system initialized for ETS forecasting
+[INFO] (Import) ✅ Data file found: data/CCF_FundYear25 09OCT25_merged.xlsx
+[INFO] (Clean) ℹ️ No missing values detected.
+[INFO] (Year 2018: 50 rows) ℹ️ Historical data row check
+[INFO] (Year 2019: 50 rows) ℹ️ Historical data row check
+[INFO] (Year 2020: 50 rows) ℹ️ Historical data row check
+[INFO] (Year 2021: 50 rows) ℹ️ Historical data row check
+[INFO] (Year 2022: 50 rows) ℹ️ Historical data row check
+[INFO] (Year 2023: 50 rows) ℹ️ Historical data row check
+[INFO] (Year 2024: 50 rows) ℹ️ Historical data row check
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: X15.SCH.Dual.Credit
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: GAI.Transfer.with.15.SCH
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: GAI.Co.enrollment.with.15.SCH
+[INFO] (Forecast) ℹ️ Excluded 2018–2019 data from ETS model for TOTAL.Institutional.Credential.leading.to.Licensure per missing data
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Institutional.Credential.leading.to.Licensure
+[INFO] (Forecast) ℹ️ Excluded 2018–2019 data from ETS model for TOTAL.OSA per missing data
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.OSA
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Certificate.I.or.II
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Advanced.Technical.Certificate
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Associate.Degree
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Bachelor.s.Degree
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Certificate.I.or.II..COV.Premium
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Associate..CoV.Premium
+[INFO] (Forecast) ✅ Completed ETS forecast for variable: TOTAL.Bachelor.s.Degree..CoV.Premium
+[INFO] (Forecast) ✅ All variables successfully forecasted!
+[INFO] (ETS Model QC) ✅ Only allowed ETS models detected: ETS(M,N,N), ETS(A,N,N).
+[INFO] (Merge) ✅ All forecast files found
+[INFO] (Merge) ℹ️ Merged forecast rows: 50
+[INFO] (Merge) ℹ️ Merged forecast columns: 16
+[INFO] (Outlier QC) ℹ️ 266 rows removed because both Forecast and 2024 < 50 (min_val).
+[WARN] (Outlier QC) ℹ️ 41 out of 600 ETS forecasts (6.8%) exceed both 20 absolute and 25% relative difference from 2024 values.
+[INFO] (Outlier QC) ✅ Exported outliers to final-forecasts/fy25-official-forecast-outliers.xlsx
+[INFO] (Export) ✅ Final ETS forecast file successfully written: ets-forecasts/fy25-official-ets-forecasts.xlsx
+QC Run Summary (Final): INFO 32 | WARN 1 | FAIL 0 | Runtime: 31.9 seconds
+Warnings/Failures:
+ - [WARN] (Outlier QC) ℹ️ 41 out of 600 ETS forecasts (6.8%) exceed both 20 absolute and 25% relative difference from 2024 values.
