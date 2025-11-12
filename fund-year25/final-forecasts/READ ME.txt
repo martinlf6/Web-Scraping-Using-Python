@@ -1,4 +1,0 @@
-fy25-official-all-forecasts = ETS and PCT FY25 forecasts + relevant historical data (2018-2024)
-fy25-official-forecast-outliers = ETS and PCT FY25 forecast outliers*
-
-*outliers defined as values exceeding 20 absolute difference and 25% difference from prior year, with at least 50 minimum value in either year examined.

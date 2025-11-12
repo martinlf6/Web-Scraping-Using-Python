@@ -1,2 +1,0 @@
-fy25-annual-subgroup-pcts = annual averages of all historical subgroup counts for each subgroup outcome
-fy25-avg-subgroup-pcts = grand average of all historical annual averages for each subgroup outcome
